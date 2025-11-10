@@ -853,7 +853,7 @@ const HomePage: NextPage<HomeProps> = ({
                         value={acc.steamId}
                         onChange={(e) => updateAccount(idx, "steamId", e.target.value)}
                         placeholder="17位数字、STEAM主页链接或自定义用户名"
-                        className="mt-1 w-full rounded-lg border-4 border-black bg-white text-black px-3 py-2 text-sm font-mono placeholder-gray-700 focus:outline-none shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]"
+                        className="mt-1 w-full bg-transparent text-black pb-1 text-sm font-mono placeholder-gray-700 focus:outline-none border-b-2 border-gray-400 focus:border-black"
                       />
                     </label>
                     
@@ -957,10 +957,10 @@ const HomePage: NextPage<HomeProps> = ({
                             className="h-full w-full object-cover"
                           />
                           <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-[#1DB954] bg-opacity-80 px-1 py-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <p className="truncate text-xs font-semibold text-black">
+                            <p className="truncate font-semibold text-black" style={{ fontSize: 'clamp(0.5rem, 2.5vw, 1rem)' }}>
                               {game.name}
                             </p>
-                            <p className="text-xs text-gray-700">
+                            <p className="text-gray-700" style={{ fontSize: 'clamp(0.5rem, 2.5vw, 0.9rem)' }}>
                               {Math.round(game.playtime_forever / 60)}小时
                             </p>
                           </div>
