@@ -296,12 +296,7 @@ const HomePage: NextPage<HomeProps> = ({
     };
 
     // 第一阶段：从大到小为主，加入少量乱序（避免完全按大小排列）
-    const RANDOM_JITTER = 0.2; // 乱序强度，可调小以保持大体有序
-    const remainingDesc = [...prepared].sort((a, b) => {
-      const sa = -a.mult + (a.rnd - 0.5) * RANDOM_JITTER;
-      const sb = -b.mult + (b.rnd - 0.5) * RANDOM_JITTER;
-      return sa - sb;
-    });
+    const remainingDesc = [...prepared].sort((a, b) => b.mult - a.mult);
     const overflow: typeof prepared = [];
 
     for (const it of remainingDesc) {
@@ -325,8 +320,9 @@ const HomePage: NextPage<HomeProps> = ({
     }
 
     // 第二阶段：对每个自由矩形在内部进行“局部货架式”多次填充
-    // 改为优先使用较大的图块填充上方空隙，尽量减少顶部空白
-    let remainingPool = overflow.sort((a, b) => b.mult - a.mult);
+    // 目标：优先用大级数尽量填满该矩形的上方与每一排
+    freeRects.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+    const remainingAsc = overflow.sort((a, b) => b.mult - a.mult);
 
     const fillRectWithShelf = (fr: Rect) => {
       // 从全局自由矩形中移除，改为在该矩形内部循环填充
@@ -338,40 +334,36 @@ const HomePage: NextPage<HomeProps> = ({
 
       // 在该rect内反复填充多行（从上到下）
       while (rect.height >= baseUnitHeight) {
-        // 行高度：挑选能放进rect的候选中“最大高度”，让上方尽量由大块填充
-        const candidates = remainingPool.filter(it => it.height <= rect.height && it.width <= rect.width);
+        // 选择该行高度：挑选能放进rect的候选中“最小高度”，以小级数优先
+        const candidates = remainingAsc.filter(it => it.height <= rect.height && it.width <= rect.width);
         if (candidates.length === 0) break;
-        const rowHeight = Math.max(...candidates.map(it => it.height));
+        const rowHeight = Math.min(...candidates.map(it => it.height));
 
         let localX = rect.x;
         let spaceW = rect.width;
         let rowMaxH = 0;
         let rowPlaced = 0;
 
-        // 在该行内，从左到右：优先精确匹配剩余宽度，否则选择最大宽度
+        // 在该行内，从左到右用“小宽度且能放下”的元素尽量占满
+        // 每次找到一个就重新扫描，直到该行无法再放置
         for (;;) {
-          let exactIndex = -1;
-          let bestIndex = -1;
-          let bestWidth = -1;
+          let foundIndex = -1;
+          let foundWidth = 0;
 
-          for (let i = 0; i < remainingPool.length; i++) {
-            const it = remainingPool[i];
+          for (let i = 0; i < remainingAsc.length; i++) {
+            const it = remainingAsc[i];
             if (it.width <= spaceW && it.height <= rowHeight) {
-              if (it.width === spaceW) {
-                exactIndex = i;
-                break;
-              }
-              if (it.width > bestWidth) {
-                bestWidth = it.width;
-                bestIndex = i;
+              // 优先选择更宽的（更容易填满剩余空间）
+              if (it.width > foundWidth) {
+                foundWidth = it.width;
+                foundIndex = i;
               }
             }
           }
 
-          const useIndex = exactIndex !== -1 ? exactIndex : bestIndex;
-          if (useIndex === -1) break; // 该行不能再放置
+          if (foundIndex === -1) break; // 该行不能再放置
 
-          const it = remainingPool[useIndex];
+          const it = remainingAsc[foundIndex];
           const placed: Rect = { x: localX, y: rect.y, width: it.width, height: it.height };
 
           results.push({
@@ -387,7 +379,7 @@ const HomePage: NextPage<HomeProps> = ({
           spaceW -= it.width;
           rowMaxH = Math.max(rowMaxH, it.height);
           rowPlaced += 1;
-          remainingPool.splice(useIndex, 1);
+          remainingAsc.splice(foundIndex, 1);
 
           // 防止死循环
           if (spaceW < baseUnitWidth) break;
@@ -417,10 +409,7 @@ const HomePage: NextPage<HomeProps> = ({
       return placedAny;
     };
 
-    // 循环消化自由矩形，持续填充直到没有可用空隙
-    while (freeRects.length > 0) {
-      freeRects.sort((a, b) => (a.y - b.y) || (a.x - b.x));
-      const fr = freeRects[0];
+    for (const fr of freeRects.slice()) {
       fillRectWithShelf(fr);
     }
 
