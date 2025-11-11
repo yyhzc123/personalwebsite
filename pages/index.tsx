@@ -10,7 +10,6 @@ import type { NextPage, GetServerSideProps } from "next";
 import Head from "next/head";
 import { useRouter } from "next/router";
 import styles from '../styles/index.module.css';
-import axios from 'axios';
 
 // Use 2:3 library capsule image ratio
 const HEADER_RATIO = 2 / 3;
@@ -786,26 +785,6 @@ const HomePage: NextPage<HomeProps> = ({
     );
   };
 
-  const handleGenerate = async () => {
-    setIsDrawing(true);
-    setImageStatus('Generating collage...');
-
-    try {
-      const response = await axios.post(
-        '/api/generate-collage',
-        { games: layoutGames },
-        { responseType: 'blob' }
-      );
-      const imageUrl = URL.createObjectURL(response.data);
-      setPreviewImage(imageUrl);
-    } catch (error) {
-      console.error(error);
-      setImageStatus('Error generating collage');
-    }
-
-    setIsDrawing(false);
-  };
-
   const handleDownload = () => {
     if (previewImage) {
       const a = document.createElement('a');
@@ -971,11 +950,11 @@ const HomePage: NextPage<HomeProps> = ({
               <div className="flex items-center justify-between gap-2 mt-4 mb-4 md:mt-5 md:mb-5">
                 <button
                   type="button"
-                  onClick={handleGenerate}
-                  disabled={!hasGames || isDrawing}
+                  onClick={handleDownload}
+                  disabled={!hasGames}
                   className="inline-flex items-center justify-center rounded-lg border-4 border-black bg-[#D8B4FE] text-black px-3 py-2 text-xs font-extrabold uppercase tracking-wide shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] transition-transform hover:-translate-y-1 hover:translate-x-1 active:translate..."
                 >
-                  {isDrawing ? "Generating..." : "下载PNG"}
+                  下载PNG
                 </button>
               </div>
 
