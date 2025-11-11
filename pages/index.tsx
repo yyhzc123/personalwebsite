@@ -795,7 +795,6 @@ const HomePage: NextPage<HomeProps> = ({
 
   const handleImageError = () => {
     if (!canvasRef.current) return;
-    setIsGenerating(true);
     const canvas = canvasRef.current;
     const dataUrl = canvas.toDataURL('image/png');
     const a = document.createElement('a');
