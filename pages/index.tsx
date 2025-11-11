@@ -1,270 +1,756 @@
-import { useState, useEffect, useRef, FormEvent, useMemo } from 'react';
-import { GetServerSideProps } from 'next';
-import Head from 'next/head';
-import { useRouter } from 'next/router';
+// Trigger re-build
+import React, {
+  useState,
+  useMemo,
+  useEffect,
+  useRef,
+  FormEvent,
+} from "react";
+import type { NextPage, GetServerSideProps } from "next";
+import Head from "next/head";
+import { useRouter } from "next/router";
+import styles from '../styles/index.module.css';
+import axios from "axios";
 
-// Type definitions
-interface Game {
+// Use 2:3 library capsule image ratio
+const HEADER_RATIO = 2 / 3;
+
+// Basic Steam game shape coming from the Web API
+type SteamGame = {
   appid: number;
   name: string;
   playtime_forever: number;
-  img_icon_url?: string;
-}
+};
 
-interface LayoutGame extends Game {
+// Layout rectangle for each game
+type LayoutGame = SteamGame & {
   x: number;
   y: number;
   width: number;
   height: number;
-}
-
-interface Rect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-interface Profile {
-  avatar: string;
-  personaname: string;
-}
+  albumUrl: string;
+};
 
 interface HomeProps {
-  initialGames: Game[];
+  initialGames: SteamGame[];
   error: string | null;
   initialSteamId: string;
   initialApiKey: string;
-  initialAccounts: { steamId: string; apiKey: string }[];
-  initialProfile: Profile | null;
-  goldAppids: number[];
+  initialAccounts?: { steamId: string; apiKey: string }[];
+  initialProfile?: { avatar: string; personaname: string } | null;
+  goldAppids?: number[];
 }
 
-// Helper function to fetch JSON with retry logic
+const buildAlbumUrl = (appid: number): string => {
+  return `https://steamcdn-a.akamaihd.net/steam/apps/${appid}/library_600x900_2x.jpg`;
+};
+
+// 带超时和自动重试的 JSON 请求封装
 async function fetchJsonWithRetry(
   url: string,
-  options: { timeoutMs: number; retries: number }
+  options: { timeoutMs?: number; retries?: number } = {}
 ): Promise<any> {
-  const { timeoutMs, retries } = options;
-  for (let i = 0; i < retries + 1; i++) {
+  const { timeoutMs = 12000, retries = 2 } = options;
+
+  let lastError: any = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-      const response = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeoutId);
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status} ${res.statusText}`);
       }
-      return await response.json();
-    } catch (e) {
-      if (i === retries) {
+      return await res.json();
+    } catch (e: any) {
+      clearTimeout(timer);
+      lastError = e;
+      // 若是超时或连接重置等网络错误，尝试重试
+      const msg = String(e?.message || "");
+      const isTransient =
+        msg.includes("AbortError") ||
+        msg.includes("ECONNRESET") ||
+        msg.includes("ETIMEDOUT") ||
+        msg.includes("ENOTFOUND") ||
+        msg.includes("network") ||
+        msg.includes("NetworkError");
+      if (!isTransient || attempt === retries) {
         throw e;
       }
-      await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+      // 小等待再重试
+      await new Promise((r) => setTimeout(r, 800));
     }
   }
+  throw lastError;
 }
 
-const HomePage = ({
+// Calculate optimal canvas dimensions for a portrait layout
+const calculateCanvasDimensions = (gameCount: number): { width: number; height: number } => {
+  if (gameCount === 0) return { width: 1080, height: 1920 };
+
+  // Base area for a mobile-friendly portrait image
+  const baseArea = 1080 * 1920;
+  const additionalAreaPerGame = 50000; // e.g., ~220x220 per game
+  const totalArea = baseArea + (gameCount > 10 ? (gameCount - 10) * additionalAreaPerGame : 0);
+
+  // Target a portrait aspect ratio, e.g., 9:16
+  const targetAspect = 9 / 16;
+
+  const width = Math.sqrt(totalArea * targetAspect);
+  const height = width / targetAspect;
+
+  // Round to reasonable values, maintaining portrait orientation
+  const finalWidth = Math.max(1080, Math.min(4320, Math.round(width / 100) * 100));
+  const finalHeight = Math.max(1920, Math.min(7680, Math.round(height / 100) * 100));
+
+  return { width: finalWidth, height: finalHeight };
+};
+
+const HomePage: NextPage<HomeProps> = ({
   initialGames,
   error,
+  initialSteamId,
+  initialApiKey,
   initialAccounts,
   initialProfile,
   goldAppids,
-}: HomeProps) => {
+}) => {
   const router = useRouter();
-  const [accounts, setAccounts] = useState(
-    initialAccounts.length > 0
-      ? initialAccounts
-      : [{ steamId: '', apiKey: '' }]
+  const [globalApiKey, setGlobalApiKey] = useState(initialApiKey || "");
+  const [accounts, setAccounts] = useState<{ steamId: string }[]>(
+    Array.isArray(initialAccounts) && initialAccounts.length > 0
+      ? initialAccounts.map(a => ({ steamId: a.steamId }))
+      : [{ steamId: initialSteamId || "" }]
   );
-  const [globalApiKey, setGlobalApiKey] = useState(
-    initialAccounts[0]?.apiKey || ''
-  );
-  const [games, setGames] = useState<Game[]>(initialGames);
   const [imageStatus, setImageStatus] = useState<string | null>(null);
-  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
 
-  const canSubmit =
-    accounts.some(a => a.steamId.trim()) && globalApiKey.trim();
+  const canSubmit = useMemo(
+    () => Boolean(globalApiKey.trim()) && accounts.length > 0 && accounts.every(a => a.steamId.trim()),
+    [globalApiKey, accounts]
+  );
 
-  const addAccount = () => {
-    setAccounts([...accounts, { steamId: '', apiKey: '' }]);
+  const addAccount = () => setAccounts([...accounts, { steamId: "" }]);
+  const removeAccount = (idx: number) => setAccounts(accounts.filter((_, i) => i !== idx));
+  const updateAccount = (idx: number, field: "steamId", value: string) => {
+    setAccounts(prev => prev.map((a, i) => (i === idx ? { ...a, [field]: value } : a)));
   };
 
-  const removeAccount = (index: number) => {
-    setAccounts(accounts.filter((_, i) => i !== index));
-  };
+  // Calculate canvas dimensions based on game count
+  const canvasDimensions = useMemo(() => {
+    const gameCount = initialGames.length;
+    return calculateCanvasDimensions(gameCount);
+  }, [initialGames]);
 
-  const updateAccount = (
-    index: number,
-    field: 'steamId' | 'apiKey',
-    value: string
-  ) => {
-    const newAccounts = [...accounts];
-    newAccounts[index][field] = value;
-    setAccounts(newAccounts);
-  };
-
-  const { layoutGames, canvasDimensions } = useMemo(() => {
-    if (games.length === 0) {
-      return { layoutGames: [], canvasDimensions: { width: 0, height: 0 } };
+  // 计算布局：按离散分级（边长为整数倍）并用“自由矩形填充”优先填补上半部空隙
+  const layoutGames: LayoutGame[] = useMemo(() => {
+    if (!initialGames || initialGames.length === 0) {
+      return [];
     }
 
-    const sortedGames = [...games].sort(
-      (a, b) => b.playtime_forever - a.playtime_forever
+    const sorted = [...initialGames].sort(
+      (a, b) => (b.playtime_forever || 0) - (a.playtime_forever || 0)
     );
 
-    const imageCount = sortedGames.length;
-    const targetWidth = 1200;
-    
-    // Prioritize vertical growth
-    const numCols = Math.max(1, Math.min(5, Math.floor(Math.sqrt(imageCount) / 1.5)));
-    const numRows = Math.ceil(imageCount / numCols);
+    // 显示所有账号的所有游戏（包含0时长）
+    const baseList = sorted;
 
-    const cellWidth = Math.floor(targetWidth / numCols);
-    const cellHeight = cellWidth; // Maintain square cells for simplicity for now
+    if (baseList.length === 0) {
+      return [];
+    }
+    // 离散分级（边长为整数倍）与面积近似正比时长
+    const times = baseList.map(g => Math.max(g.playtime_forever, 1));
+    const maxTime = Math.max(...times, 1);
+    // 恢复之前的归一化方式：基于最大时长的平方根归一化
+    const sqrtMax = Math.sqrt(maxTime);
+    const TIER_MAX = 8; // 调整为8级，更柔和
 
-    const canvasWidth = numCols * cellWidth;
-    const canvasHeight = numRows * cellHeight;
-
-    const layout: LayoutGame[] = [];
-    for (let i = 0; i < imageCount; i++) {
-      const game = sortedGames[i];
-      const row = Math.floor(i / numCols);
-      const col = i % numCols;
-      layout.push({
-        ...game,
-        x: col * cellWidth,
-        y: row * cellHeight,
-        width: cellWidth,
-        height: cellHeight,
+    const items = baseList
+      .map((game) => {
+        const sqrtVal = Math.sqrt(Math.max(game.playtime_forever, 1));
+        const normalized = sqrtVal / sqrtMax;
+        let mult = Math.max(1, Math.round(normalized * TIER_MAX));
+        const hours = (game.playtime_forever || 0) / 60;
+        if (hours >= 10) {
+          mult = Math.max(mult, 2);
+        } else {
+          mult = 1;
+        }
+        return { game, mult };
+      })
+      .sort((a, b) => {
+        const t = (b.game.playtime_forever || 0) - (a.game.playtime_forever || 0);
+        if (t !== 0) return t;
+        return b.mult - a.mult;
       });
+
+    const results: LayoutGame[] = [];
+    const { width: LAYOUT_WIDTH, height: LAYOUT_HEIGHT } = canvasDimensions;
+    const ASPECT_RATIO = 2 / 3;
+
+    const totalUnits = items.reduce((acc, it) => acc + it.mult * it.mult, 0);
+    const canvasArea = LAYOUT_WIDTH * LAYOUT_HEIGHT;
+    let baseUnitArea = canvasArea / Math.max(totalUnits, 1);
+    let baseUnitHeight = Math.sqrt(baseUnitArea / ASPECT_RATIO);
+    let baseUnitWidth = baseUnitHeight * ASPECT_RATIO;
+
+    const maxMult = items.length ? Math.max(...items.map(i => i.mult)) : 1;
+    const maxItemWidth = maxMult * baseUnitWidth;
+    if (maxItemWidth > LAYOUT_WIDTH) {
+      const scale = LAYOUT_WIDTH / maxItemWidth;
+      baseUnitWidth *= scale;
+      baseUnitHeight *= scale;
     }
 
-    return {
-      layoutGames: layout,
-      canvasDimensions: { width: canvasWidth, height: canvasHeight },
+    // 量化基础单元，使得布局宽度可被整除，减少无法填满的缝隙
+    const gridCols = Math.max(1, Math.floor(LAYOUT_WIDTH / Math.max(baseUnitWidth, 1)));
+    baseUnitWidth = Math.max(1, Math.floor(LAYOUT_WIDTH / gridCols));
+    baseUnitHeight = Math.max(1, Math.round(baseUnitWidth / ASPECT_RATIO));
+
+    type Rect = { x: number; y: number; width: number; height: number };
+    // 画布顶部预留信息栏高度（不大，占整体高度约6%，上限100px，下限60px）
+    const headerInfoHeight = Math.max(60, Math.round(Math.min(LAYOUT_HEIGHT * 0.06, 100)));
+
+    const freeRects: Rect[] = [
+      { x: 0, y: headerInfoHeight, width: LAYOUT_WIDTH, height: Math.max(0, LAYOUT_HEIGHT - headerInfoHeight) },
+    ];
+
+    const RANDOM_SEED = 1337.123;
+    const prepared = items.map(it => ({
+      ...it,
+      width: it.mult * baseUnitWidth,
+      height: it.mult * baseUnitHeight,
+      // 使用基于 appid 的可复现抖动，避免 SSR/CSR 乱序导致水合不一致
+      rnd: Math.abs(Math.sin((it.game.appid || 0) * RANDOM_SEED)),
+    }));
+
+    // 工具：矩形包含判断
+    const contains = (a: Rect, b: Rect) =>
+      a.x <= b.x && a.y <= b.y && (a.x + a.width) >= (b.x + b.width) && (a.y + a.height) >= (b.y + b.height);
+
+    // 工具：清理被包含的自由矩形，避免重叠/冗余
+    const pruneFreeRects = () => {
+      for (let i = 0; i < freeRects.length; i++) {
+        for (let j = 0; j < freeRects.length; j++) {
+          if (i === j) continue;
+          const ri = freeRects[i];
+          const rj = freeRects[j];
+          if (ri && rj && contains(rj, ri)) {
+            freeRects.splice(i, 1);
+            i--;
+            break;
+          }
+        }
+      }
     };
-  }, [games]);
 
+    const addFreeRect = (r: Rect) => {
+      if (r.width <= 0 || r.height <= 0) return;
+      freeRects.push(r);
+    };
+
+    // 选择最佳自由矩形：优先上方（y小）、其次左方（x小），并奖励“宽或高精确匹配”
+    const chooseBestRect = (w: number, h: number): Rect | null => {
+      let best: Rect | null = null;
+      let bestScore = Number.POSITIVE_INFINITY;
+      for (const fr of freeRects) {
+        if (fr.width >= w && fr.height >= h) {
+          const exactW = fr.width === w;
+          const exactH = fr.height === h;
+          // 分数：上方优先，其次左方；精确匹配给予大幅奖励（降低分数）
+          const score = fr.y * LAYOUT_WIDTH + fr.x + (exactW && exactH ? -1e6 : (exactW || exactH ? -5e5 : 0));
+          if (score < bestScore) {
+            bestScore = score;
+            best = fr;
+          }
+        }
+      }
+      return best;
+    };
+
+    // 使用“断头台”式拆分：产生右侧与底部两个自由矩形，并清理冗余
+    const splitFreeRect = (fr: Rect, placed: Rect) => {
+      // 移除被使用的自由矩形
+      const idx = freeRects.indexOf(fr);
+      if (idx >= 0) freeRects.splice(idx, 1);
+
+      const right: Rect = {
+        x: placed.x + placed.width,
+        y: fr.y,
+        width: fr.width - placed.width,
+        height: placed.height,
+      };
+      const bottom: Rect = {
+        x: fr.x,
+        y: placed.y + placed.height,
+        width: fr.width,
+        height: fr.height - placed.height,
+      };
+
+      addFreeRect(right);
+      addFreeRect(bottom);
+      pruneFreeRects();
+    };
+
+    // 第一阶段：从大到小为主，加入少量乱序（避免完全按大小排列）
+    const RANDOM_JITTER = 0.2; // 乱序强度，可调小以保持大体有序
+    const remainingDesc = [...prepared].sort((a, b) => {
+      const sa = -a.mult + (a.rnd - 0.5) * RANDOM_JITTER;
+      const sb = -b.mult + (b.rnd - 0.5) * RANDOM_JITTER;
+      return sa - sb;
+    });
+    const overflow: typeof prepared = [];
+
+    for (const it of remainingDesc) {
+      const w = it.width;
+      const h = it.height;
+      const target = chooseBestRect(w, h);
+      if (!target) {
+        overflow.push(it);
+        continue;
+      }
+      const placed: Rect = { x: target.x, y: target.y, width: w, height: h };
+      results.push({
+        ...it.game,
+        x: placed.x,
+        y: placed.y,
+        width: placed.width,
+        height: placed.height,
+        albumUrl: buildAlbumUrl(it.game.appid),
+      });
+      splitFreeRect(target, placed);
+    }
+
+    // 第二阶段：对每个自由矩形在内部进行“局部货架式”多次填充
+    // 改为优先使用较大的图块填充上方空隙，尽量减少顶部空白
+    let remainingPool = overflow.sort((a, b) => b.mult - a.mult);
+
+    const fillRectWithShelf = (fr: Rect) => {
+      // 从全局自由矩形中移除，改为在该矩形内部循环填充
+      const idx = freeRects.indexOf(fr);
+      if (idx >= 0) freeRects.splice(idx, 1);
+
+      let rect: Rect = { ...fr };
+      let placedAny = false;
+
+      // 在该rect内反复填充多行（从上到下）
+      while (rect.height >= baseUnitHeight) {
+        // 行高度：挑选能放进rect的候选中“最大高度”，让上方尽量由大块填充
+        const candidates = remainingPool.filter(it => it.height <= rect.height && it.width <= rect.width);
+        if (candidates.length === 0) break;
+        const rowHeight = Math.max(...candidates.map(it => it.height));
+
+        let localX = rect.x;
+        let spaceW = rect.width;
+        let rowMaxH = 0;
+        let rowPlaced = 0;
+
+        // 在该行内，从左到右：优先精确匹配剩余宽度，否则选择最大宽度
+        for (;;) {
+          let exactIndex = -1;
+          let bestIndex = -1;
+          let bestWidth = -1;
+
+          for (let i = 0; i < remainingPool.length; i++) {
+            const it = remainingPool[i];
+            if (it.width <= spaceW && it.height <= rowHeight) {
+              if (it.width === spaceW) {
+                exactIndex = i;
+                break;
+              }
+              if (it.width > bestWidth) {
+                bestWidth = it.width;
+                bestIndex = i;
+              }
+            }
+          }
+
+          const useIndex = exactIndex !== -1 ? exactIndex : bestIndex;
+          if (useIndex === -1) break; // 该行不能再放置
+
+          const it = remainingPool[useIndex];
+          const placed: Rect = { x: localX, y: rect.y, width: it.width, height: it.height };
+
+          results.push({
+            ...it.game,
+            x: placed.x,
+            y: placed.y,
+            width: placed.width,
+            height: placed.height,
+            albumUrl: buildAlbumUrl(it.game.appid),
+          });
+
+          localX += it.width;
+          spaceW -= it.width;
+          rowMaxH = Math.max(rowMaxH, it.height);
+          rowPlaced += 1;
+          remainingPool.splice(useIndex, 1);
+
+          // 防止死循环
+          if (spaceW < baseUnitWidth) break;
+        }
+
+        if (rowPlaced === 0) break; // 该行无法放置任何元素
+
+        // 该行右侧剩余空间作为新的自由矩形暴露给全局（供后续行或其他空隙继续填）
+        if (spaceW > 0) {
+          addFreeRect({ x: localX, y: rect.y, width: spaceW, height: rowMaxH });
+        }
+
+        // 消化当前行高度，进入下一行
+        rect.y += rowMaxH;
+        rect.height -= rowMaxH;
+        placedAny = true;
+
+        // 清理冗余
+        pruneFreeRects();
+      }
+
+      // 把未被填满的底部剩余区域也作为自由矩形继续暴露（供其他循环尝试）
+      if (rect.height > 0 && rect.width > 0) {
+        addFreeRect(rect);
+        pruneFreeRects();
+      }
+      return placedAny;
+    };
+
+    // 循环消化自由矩形，持续填充直到没有可用空隙
+    while (freeRects.length > 0) {
+      freeRects.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+      const fr = freeRects[0];
+      fillRectWithShelf(fr);
+    }
+
+    return results;
+  }, [initialGames, canvasDimensions]);
+
+  // Draw the collage into a canvas
   useEffect(() => {
-    if (layoutGames.length === 0 || !canvasRef.current) return;
-
     let isCancelled = false;
-    const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
-    if (!context) return;
-
-    canvas.width = canvasDimensions.width;
-    canvas.height = canvasDimensions.height;
 
     const drawCollage = async () => {
-      setIsDrawing(true);
-      setImageStatus(`Drawing ${layoutGames.length} games...`);
+      if (!canvasRef.current || layoutGames.length === 0) {
+        return;
+      }
 
-      context.clearRect(0, 0, canvas.width, canvas.height);
-      context.fillStyle = '#000000';
+      const canvas = canvasRef.current;
+      const context = canvas.getContext("2d");
+
+      if (!context) {
+        return;
+      }
+
+      canvas.width = canvasDimensions.width;
+      canvas.height = canvasDimensions.height;
+
+      context.fillStyle = "#1a1a1a";
       context.fillRect(0, 0, canvas.width, canvas.height);
 
-      const imagePromises = layoutGames.map(game => {
-        return new Promise<HTMLImageElement | null>(resolve => {
+      const loadImage = (src: string): Promise<HTMLImageElement> => {
+        return new Promise((resolve, reject) => {
           const img = new Image();
-          img.crossOrigin = 'Anonymous';
+          img.crossOrigin = "anonymous";
           img.onload = () => resolve(img);
-          img.onerror = () => resolve(null);
-          img.src = `https://steamcdn-a.akamaihd.net/steam/apps/${game.appid}/header.jpg`;
+          img.onerror = () => reject(new Error("Failed to load image"));
+          img.src = src;
         });
+      };
+
+      setIsDrawing(true);
+      setImageStatus(
+        `正在加载 ${layoutGames.length} 个游戏封面并构建拼图...`
+      );
+
+      const uniqueGames = new Map<
+        number,
+        { albumUrl: string; name: string }
+      >();
+
+      layoutGames.forEach((game) => {
+        if (!uniqueGames.has(game.appid)) {
+          uniqueGames.set(game.appid, {
+            albumUrl: game.albumUrl,
+            name: game.name,
+          });
+        }
       });
 
-      const images = await Promise.all(imagePromises);
+      const imagesByAppid = new Map<number, HTMLImageElement | null>();
+      const entries = Array.from(uniqueGames.entries());
+      let loadedCount = 0;
 
-      if (isCancelled) return;
+      for (const [appid, info] of entries) {
+        if (isCancelled) {
+          return;
+        }
 
-      for (let i = 0; i < layoutGames.length; i++) {
-        const game = layoutGames[i];
-        const img = images[i];
-        const cellW = game.width;
-        const cellH = game.height;
+        let img: HTMLImageElement | null = null;
 
-        if (img) {
-          const scale = Math.max(cellW / img.width, cellH / img.height);
-          const imgW = img.width * scale;
-          const imgH = img.height * scale;
-          const imgX = (cellW - imgW) / 2;
-          const imgY = (cellH - imgH) / 2;
+        try {
+          img = await loadImage(info.albumUrl);
+        } catch {
+          img = null;
+        }
+
+        imagesByAppid.set(appid, img);
+        loadedCount += 1;
+
+        if (loadedCount % 10 === 0 || loadedCount === entries.length) {
+          setImageStatus(
+            `已加载 ${loadedCount} / ${entries.length} 个游戏封面...`
+          );
+        }
+      }
+
+      setImageStatus("正在绘制拼图...");
+
+      // 顶部信息栏：头像、用户名、游戏数与总时长
+      const headerInfoHeight = Math.max(60, Math.round(Math.min(canvas.height * 0.06, 100)));
+      let avatarImg: HTMLImageElement | null = null;
+      const avatarUrl = initialProfile?.avatar || "";
+      const personaName = initialProfile?.personaname || "";
+      if (avatarUrl) {
+        try {
+          avatarImg = await loadImage(avatarUrl);
+        } catch {
+          avatarImg = null;
+        }
+      }
+
+      // 背景条
+      context.fillStyle = "#0f1115";
+      context.fillRect(0, 0, canvas.width, headerInfoHeight);
+
+      // 头像（圆形裁剪）
+      const pad = 10;
+      const avatarSize = Math.max(40, headerInfoHeight - pad * 2);
+      if (avatarImg && avatarImg.width > 0 && avatarImg.height > 0) {
+        const ax = pad + avatarSize / 2;
+        const ay = headerInfoHeight / 2;
+        context.save();
+        context.beginPath();
+        context.rect(pad, (headerInfoHeight - avatarSize) / 2, avatarSize, avatarSize);
+        context.clip();
+        context.drawImage(
+          avatarImg,
+          0,
+          0,
+          avatarImg.width,
+          avatarImg.height,
+          pad,
+          (headerInfoHeight - avatarSize) / 2,
+          avatarSize,
+          avatarSize
+        );
+        context.restore();
+        // 头像边框
+        context.save();
+        context.strokeStyle = "#ffd700";
+        context.lineWidth = 3;
+        context.beginPath();
+        context.strokeRect(pad, (headerInfoHeight - avatarSize) / 2, avatarSize, avatarSize);
+        context.stroke();
+        context.restore();
+      }
+
+      // 文本信息
+      const textX = pad * 2 + avatarSize;
+      const centerY = headerInfoHeight / 2;
+      const totalPlayMinutes = initialGames.reduce((acc, g) => acc + (g.playtime_forever || 0), 0);
+      const totalHours = Math.round(totalPlayMinutes / 60);
+      const uniqueCount = entries.length;
+      context.fillStyle = "#ffffff";
+      context.textAlign = "left";
+      context.textBaseline = "middle";
+      context.font = "bold 18px system-ui, -apple-system";
+      context.fillText(personaName || "", textX, centerY - 10);
+      context.font = "600 14px system-ui, -apple-system";
+      const stats = `游戏数：${uniqueCount}  |  总时长：${totalHours} 小时`;
+      context.fillText(stats, textX, centerY + 12);
+
+      const goldSet = new Set(goldAppids || []);
+
+      for (const game of layoutGames) {
+        if (isCancelled) {
+          return;
+        }
+
+        const img = imagesByAppid.get(game.appid) || null;
+
+        if (img && img.width > 0 && img.height > 0) {
+          // Draw with proper aspect ratio (cover fit)
+          const cellW = game.width;
+          const cellH = game.height;
+          const cellAspect = cellW / cellH;
+
+          const imgW = img.width;
+          const imgH = img.height;
+          const imgAspect = imgW / imgH;
+
+          let sx = 0;
+          let sy = 0;
+          let sWidth = imgW;
+          let sHeight = imgH;
+
+          if (imgAspect > cellAspect) {
+            sWidth = imgH * cellAspect;
+            sx = (imgW - sWidth) / 2;
+          } else if (imgAspect < cellAspect) {
+            sHeight = imgW / cellAspect;
+            sy = (imgH - sHeight) / 2;
+          }
+
           context.drawImage(
             img,
-            game.x + imgX,
-            game.y + imgY,
-            imgW,
-            imgH
+            sx,
+            sy,
+            sWidth,
+            sHeight,
+            game.x,
+            game.y,
+            cellW,
+            cellH
           );
+          // 超过500小时，绘制时长标记（居中偏下三分之一，随尺寸缩放）
+          {
+            const hours = Math.round((game.playtime_forever || 0) / 60);
+            if (hours >= 500) {
+              const badgeText = `${hours}h`;
+              context.save();
+              const base = Math.min(cellW, cellH);
+              const fontSize = Math.round(Math.max(12, Math.min(24, base * 0.08)));
+              const padding = Math.round(Math.max(4, Math.min(12, base * 0.03)));
+              context.font = `bold ${fontSize}px system-ui, -apple-system`;
+              const metrics = context.measureText(badgeText);
+              const textW = Math.ceil(metrics.width);
+              const badgeW = textW + padding * 2;
+              const badgeH = Math.round(fontSize + padding * 1.2);
+              const margin = Math.round(Math.max(4, base * 0.02));
+              const centerX = game.x + cellW / 2;
+              const centerY = game.y + cellH * 0.66;
+              let bx = Math.round(centerX - badgeW / 2);
+              let by = Math.round(centerY - badgeH / 2);
+              // 边界保护，避免溢出到图块外
+              if (bx < game.x + margin) bx = game.x + margin;
+              if (bx + badgeW > game.x + cellW - margin) bx = game.x + cellW - margin - badgeW;
+              if (by < game.y + margin) by = game.y + margin;
+              if (by + badgeH > game.y + cellH - margin) by = game.y + cellH - margin - badgeH;
+              context.fillStyle = "rgba(0,0,0,0.6)";
+              context.fillRect(bx, by, badgeW, badgeH);
+              context.fillStyle = "#ffffff";
+              context.textAlign = "center";
+              context.textBaseline = "middle";
+              context.fillText(badgeText, Math.round(bx + badgeW / 2), Math.round(by + badgeH / 2));
+              context.restore();
+            }
+          }
+          // 全成就金色内嵌边框
+          if (goldSet.has(game.appid)) {
+            const t = Math.max(2, Math.round(Math.min(cellW, cellH) * 0.02));
+            const inset = Math.floor(t / 2) + 2;
+            context.save();
+            context.strokeStyle = "#ffd700";
+            context.lineWidth = t;
+            context.globalAlpha = 0.95;
+            context.strokeRect(
+              game.x + inset,
+              game.y + inset,
+              cellW - inset * 2,
+              cellH - inset * 2
+            );
+            context.restore();
+          }
         } else {
-          context.fillStyle = '#333';
-          context.fillRect(game.x, game.y, cellW, cellH);
-          context.fillStyle = '#fff';
-          context.textAlign = 'center';
-          context.textBaseline = 'middle';
-          context.font = '12px system-ui';
-          context.fillText(game.name, game.x + cellW / 2, game.y + cellH / 2, cellW - 20);
-        }
+          // Fallback for failed images
+          context.fillStyle = "#f97316";
+          context.fillRect(game.x, game.y, game.width, game.height);
 
-        if (goldAppids.includes(game.appid)) {
+          context.fillStyle = "#000000";
+          context.font = "bold 14px system-ui, -apple-system";
+          context.textAlign = "center";
+          context.textBaseline = "middle";
+
+          const maxChars = Math.floor(game.width / 8);
+          const label =
+            game.name.length > maxChars 
+              ? `${game.name.slice(0, maxChars)}...` 
+              : game.name;
+
           context.save();
-          const inset = 2;
-          const t = Math.max(2, Math.min(6, cellW * 0.02));
-          context.strokeStyle = '#ffd700';
-          context.lineWidth = t;
-          context.globalAlpha = 0.95;
-          context.strokeRect(
-            game.x + inset,
-            game.y + inset,
-            cellW - inset * 2,
-            cellH - inset * 2
+          context.beginPath();
+          context.rect(game.x, game.y, game.width, game.height);
+          context.clip();
+          context.fillText(
+            label,
+            game.x + game.width / 2,
+            game.y + game.height / 2
           );
           context.restore();
-        }
 
-        const hours = Math.round((game.playtime_forever || 0) / 60);
-        if (hours >= 500) {
-          const badgeText = `${hours}h`;
-          context.save();
-          const base = Math.min(cellW, cellH);
-          const fontSize = Math.round(Math.max(12, Math.min(24, base * 0.08)));
-          const padding = Math.round(Math.max(4, Math.min(12, base * 0.03)));
-          context.font = `bold ${fontSize}px system-ui, -apple-system`;
-          const metrics = context.measureText(badgeText);
-          const textW = Math.ceil(metrics.width);
-          const badgeW = textW + padding * 2;
-          const badgeH = Math.round(fontSize + padding * 1.2);
-          const margin = Math.round(Math.max(4, base * 0.02));
-          const centerX = game.x + cellW / 2;
-          const centerY = game.y + cellH * 0.66;
-          let bx = Math.round(centerX - badgeW / 2);
-          let by = Math.round(centerY - badgeH / 2);
-          if (bx < game.x + margin) bx = game.x + margin;
-          if (bx + badgeW > game.x + cellW - margin) bx = game.x + cellW - margin - badgeW;
-          if (by < game.y + margin) by = game.y + margin;
-          if (by + badgeH > game.y + cellH - margin) by = game.y + cellH - margin - badgeH;
-          context.fillStyle = 'rgba(0,0,0,0.6)';
-          context.fillRect(bx, by, badgeW, badgeH);
-          context.fillStyle = '#ffffff';
-          context.textAlign = 'center';
-          context.textBaseline = 'middle';
-          context.fillText(badgeText, Math.round(bx + badgeW / 2), Math.round(by + badgeH / 2));
-          context.restore();
+          // 全成就金色内嵌边框（即使封面加载失败也标记）
+          if (goldSet.has(game.appid)) {
+            const cellW = game.width;
+            const cellH = game.height;
+            const t = Math.max(2, Math.round(Math.min(cellW, cellH) * 0.02));
+            const inset = Math.floor(t / 2) + 2;
+            context.save();
+            context.strokeStyle = "#ffd700";
+            context.lineWidth = t;
+            context.globalAlpha = 0.95;
+            context.strokeRect(
+              game.x + inset,
+              game.y + inset,
+              cellW - inset * 2,
+              cellH - inset * 2
+            );
+            context.restore();
+          }
+          // 超过500小时，绘制时长标记（封面加载失败同样显示；居中偏下三分之一，随尺寸缩放）
+          {
+            const hours = Math.round((game.playtime_forever || 0) / 60);
+            if (hours >= 500) {
+              const badgeText = `${hours}h`;
+              context.save();
+              const cellW = game.width;
+              const cellH = game.height;
+              const base = Math.min(cellW, cellH);
+              const fontSize = Math.round(Math.max(12, Math.min(24, base * 0.08)));
+              const padding = Math.round(Math.max(4, Math.min(12, base * 0.03)));
+              context.font = `bold ${fontSize}px system-ui, -apple-system`;
+              const metrics = context.measureText(badgeText);
+              const textW = Math.ceil(metrics.width);
+              const badgeW = textW + padding * 2;
+              const badgeH = Math.round(fontSize + padding * 1.2);
+              const margin = Math.round(Math.max(4, base * 0.02));
+              const centerX = game.x + cellW / 2;
+              const centerY = game.y + cellH * 0.66;
+              let bx = Math.round(centerX - badgeW / 2);
+              let by = Math.round(centerY - badgeH / 2);
+              if (bx < game.x + margin) bx = game.x + margin;
+              if (bx + badgeW > game.x + cellW - margin) bx = game.x + cellW - margin - badgeW;
+              if (by < game.y + margin) by = game.y + margin;
+              if (by + badgeH > game.y + cellH - margin) by = game.y + cellH - margin - badgeH;
+              context.fillStyle = "rgba(0,0,0,0.6)";
+              context.fillRect(bx, by, badgeW, badgeH);
+              context.fillStyle = "#ffffff";
+              context.textAlign = "center";
+              context.textBaseline = "middle";
+              context.fillText(badgeText, Math.round(bx + badgeW / 2), Math.round(by + badgeH / 2));
+              context.restore();
+            }
+          }
         }
       }
 
       if (!isCancelled) {
         setImageStatus(
-          `Complete! Total ${layoutGames.length} games. Resolution: ${canvasDimensions.width}x${canvasDimensions.height}`
+          `完成!共 ${layoutGames.length} 个游戏,分辨率 ${canvasDimensions.width}x${canvasDimensions.height}`
         );
         setIsDrawing(false);
-        setPreviewImage(canvas.toDataURL('image/png'));
+        setPreviewImage(canvas.toDataURL("image/png"));
       }
     };
 
@@ -273,25 +759,30 @@ const HomePage = ({
     return () => {
       isCancelled = true;
     };
-  }, [layoutGames, canvasDimensions, goldAppids]);
+  }, [layoutGames, canvasDimensions]);
 
   const hasGames = layoutGames.length > 0;
 
   const handleSubmit = (event: FormEvent) => {
     event.preventDefault();
-    setPreviewImage(null);
+
+    setPreviewImage(null); // Reset preview on new submission
+
     const normalizedSteamIds = accounts
       .map(a => a.steamId.trim())
       .filter(s => s);
+
     const key = globalApiKey.trim();
     if (normalizedSteamIds.length === 0 || !key) {
-      setImageStatus('Please enter at least one Steam ID and provide a global API key.');
+      setImageStatus("请至少输入一个Steam ID，并提供全局API密钥");
       return;
     }
-    setImageStatus(`Fetching games for ${normalizedSteamIds.length} accounts from Steam API...`);
+
+    setImageStatus(`正在从Steam API获取${normalizedSteamIds.length}个账号的游戏库...`);
+
     router.push(
       {
-        pathname: '/',
+        pathname: "/",
         query: {
           steamId: normalizedSteamIds,
           apiKey: key,
@@ -313,13 +804,29 @@ const HomePage = ({
     document.body.removeChild(a);
   };
 
+  const handleImageError = () => {
+    if (!canvasRef.current) return;
+    setIsGenerating(true);
+    const canvas = canvasRef.current;
+    const dataUrl = canvas.toDataURL('image/png');
+    const a = document.createElement('a');
+    a.href = dataUrl;
+    a.download = 'steam-collage.png';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  const scaleX = 100 / canvasDimensions.width;
+  const scaleY = 100 / canvasDimensions.height;
+
   return (
     <>
       <Head>
-        <title>STEAM 生涯拼贴</title>
+        <title>STEAM生涯拼图</title>
         <meta
           name="description"
-          content="根据你的 Steam 游戏时间生成一个拼贴画。你玩的时间越长，图像就越大。"
+          content="根据Steam游戏时长生成拼图,游戏时长越长图片越大"
         />
       </Head>
       <div className="min-h-screen bg-gray-100 text-black">
@@ -327,7 +834,7 @@ const HomePage = ({
           <header className="mb-8 md:mb-10">
             <div className="inline-block bg-[#1DB954] text-black border-4 border-black rounded-xl px-6 py-4 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
               <h1 className="text-3xl md:text-4xl font-black tracking-tight uppercase">
-                STEAM 生涯拼贴
+                STEAM生涯拼图
               </h1>
             </div>
             <p className="mt-4 max-w-2xl text-sm md:text-base font-medium">
@@ -342,17 +849,17 @@ const HomePage = ({
           <section className="grid gap-6 md:grid-cols-2 md:gap-8 items-start">
             <div className="bg-[#1DB954] text-black border-4 border-black rounded-xl p-6 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] flex flex-col gap-4">
               <h2 className="text-lg md:text-xl font-extrabold uppercase">
-                1. 连接 Steam 帐户
+                1. 连接Steam账号
               </h2>
 
               <form onSubmit={handleSubmit} className="flex flex-col gap-4">
                 <label className="flex flex-col gap-1 text-sm font-semibold">
-                  <span className="uppercase tracking-wide">请输入一个 Steam Web API KEY</span>
+                  <span className="uppercase tracking-wide">请提供Steam Web API KEY</span>
                   <input
                     type="password"
                     value={globalApiKey}
                     onChange={(e) => setGlobalApiKey(e.target.value)}
-                    placeholder="输入任意一个 STEAM 帐户的 API KEY"
+                    placeholder="输入任一STEAM账号的API KEY"
                     className="mt-1 w-full rounded-lg border-4 border-black bg-white text-black px-3 py-2 text-sm font-mono placeholder-gray-700 focus:outline-none shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]"
                   />
                 </label>
@@ -364,7 +871,7 @@ const HomePage = ({
                         type="text"
                         value={acc.steamId}
                         onChange={(e) => updateAccount(idx, "steamId", e.target.value)}
-                        placeholder="17 位数字、STEAM 主页链接或自定义用户名"
+                        placeholder="17位数字、STEAM主页链接或自定义用户名"
                         className="mt-1 w-full bg-transparent text-black pb-1 text-sm font-mono placeholder-gray-700 focus:outline-none border-b-2 border-gray-400 focus:border-black"
                       />
                     </label>
@@ -375,7 +882,7 @@ const HomePage = ({
                         onClick={() => removeAccount(idx)}
                         className="inline-flex items-center justify-center rounded-lg border-4 border-black bg-red-400 text-black px-3 py-2 text-xs font-extrabold uppercase tracking-wide shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] transition-transform hover:-translate-y-1 hover:translate-x-1"
                       >
-                        删除此帐户
+                        移除该账号
                       </button>
                     )}
                   </div>
@@ -386,11 +893,11 @@ const HomePage = ({
                   onClick={addAccount}
                   className="inline-flex items-center justify-center rounded-lg border-4 border-black bg-white text-black px-3 py-2 text-xs font-extrabold uppercase tracking-wide shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] transition-transform hover:-translate-y-1 hover:translate-x-1"
                 >
-                  + 添加帐户
+                  ＋ 添加账号
                 </button>
 
                 <p className="text-xs text-black">
-                  在以下网址获取 API 密钥{' '}
+                  在{' '}
                   <a
                     href="https://steamcommunity.com/dev/apikey"
                     target="_blank"
@@ -399,7 +906,7 @@ const HomePage = ({
                   >
                     https://steamcommunity.com/dev/apikey
                   </a>{' '}
-                  并将你的个人资料可见性设置为公开。
+                  获取API密钥,并将资料可见性设置为公开。
                 </p>
 
                 <button
@@ -407,12 +914,12 @@ const HomePage = ({
                   className="mt-2 inline-flex items-center justify-center rounded-lg border-4 border-black bg-[#D8B4FE] text-black px-4 py-2 text-sm font-extrabold uppercase tracking-wide shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] transition-transform hover:-translate-y-1 hover:translate-x-1 active:translate-y-0 active:translate-x-0 disabled:cursor-not-allowed disabled:bg-gray-300"
                   disabled={!canSubmit}
                 >
-                  生成拼贴
+                  生成拼图
                 </button>
 
                 {error && (
                   <div className="mt-2 rounded-lg border-4 border-black bg-red-200 px-3 py-2 text-xs font-semibold text-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
-                    <p className="uppercase tracking-wide">Steam API 错误</p>
+                    <p className="uppercase tracking-wide">Steam API错误</p>
                     <p className="mt-1 break-words">{error}</p>
                   </div>
                 )}
@@ -422,17 +929,19 @@ const HomePage = ({
                     {imageStatus}
                   </p>
                 )}
+
+                {/* 隐私说明已移除 */}
               </form>
             </div>
 
             <div className="bg-[#1DB954] text-black border-4 border-black rounded-xl px-4 pt-5 pb-5 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] flex flex-col gap-2">
               <div className="flex items-center justify-between gap-2">
                 <h2 className="text-lg md:text-xl font-extrabold uppercase">
-                  2. 预览拼贴
+                  2. 预览拼图
                 </h2>
                 {hasGames && (
                   <span className="rounded-full border-4 border-black bg-[#1DB954] px-3 py-1 text-xs font-black uppercase tracking-wide text-black">
-                    {layoutGames.length} 个游戏
+                    {layoutGames.length}个游戏
                   </span>
                 )}
               </div>
@@ -443,7 +952,7 @@ const HomePage = ({
                     <div className="flex h-full flex-col items-center justify-center gap-4 bg-green-100">
                       <div className="bg-gray-200 border-2 border-dashed rounded-xl w-16 h-16" />
                       <p className="max-w-xs px-4 text-center text-xs md:text-sm font-semibold">
-                        输入你的 Steam 帐户信息，你的游戏拼贴将显示在这里。
+                        输入Steam账号信息后,你的游戏拼图将在这里显示
                       </p>
                     </div>
                   )}
@@ -468,7 +977,7 @@ const HomePage = ({
                   disabled={!hasGames}
                   className="inline-flex items-center justify-center rounded-lg border-4 border-black bg-[#D8B4FE] text-black px-3 py-2 text-xs font-extrabold uppercase tracking-wide shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] transition-transform hover:-translate-y-1 hover:translate-x-1 active:translate..."
                 >
-                  下载 PNG
+                  下载PNG
                 </button>
               </div>
 
@@ -488,13 +997,13 @@ export const getServerSideProps: GetServerSideProps<HomeProps> = async (
   const rawApiKey = context.query.apiKey;
 
   const steamIds =
-    typeof rawSteamId === 'string'
+    typeof rawSteamId === "string"
       ? [rawSteamId]
       : Array.isArray(rawSteamId)
       ? rawSteamId
       : [];
   const apiKeys =
-    typeof rawApiKey === 'string'
+    typeof rawApiKey === "string"
       ? [rawApiKey]
       : Array.isArray(rawApiKey)
       ? rawApiKey
@@ -503,16 +1012,16 @@ export const getServerSideProps: GetServerSideProps<HomeProps> = async (
   const initialAccounts =
     steamIds.length > 0
       ? steamIds.map((id, idx) => ({
-          steamId: id || '',
-          apiKey: apiKeys[idx] || apiKeys[0] || '',
+          steamId: id || "",
+          apiKey: apiKeys[idx] || apiKeys[0] || "",
         }))
       : [];
 
   const props: HomeProps = {
     initialGames: [],
     error: null,
-    initialSteamId: initialAccounts[0]?.steamId || '',
-    initialApiKey: initialAccounts[0]?.apiKey || '',
+    initialSteamId: initialAccounts[0]?.steamId || "",
+    initialApiKey: initialAccounts[0]?.apiKey || "",
     initialAccounts,
     initialProfile: null,
     goldAppids: [],
@@ -524,26 +1033,28 @@ export const getServerSideProps: GetServerSideProps<HomeProps> = async (
 
   const pairs = steamIds
     .map((id, idx) => ({
-      input: String(id || '').trim(),
-      key: String(apiKeys[idx] || apiKeys[0] || '').trim(),
+      input: String(id || "").trim(),
+      key: String(apiKeys[idx] || apiKeys[0] || "").trim(),
     }))
     .filter((p) => p.input && p.key);
 
   if (pairs.length === 0) {
-    props.error = 'No valid Steam accounts provided.';
+    props.error = "未提供有效的Steam账号";
     return { props };
   }
 
   const resolveOne = async (input: string, apiKeyParam: string): Promise<string | null> => {
+    // 支持: 17位数字、任意数字、主页链接(id/profiles)、仅Vanity用户名
     const urlMatch = input.match(
       /^https?:\/\/steamcommunity\.com\/(id|profiles)\/([^\/?#]+)/
     );
     if (urlMatch) {
       const kind = urlMatch[1];
       const value = decodeURIComponent(urlMatch[2]);
-      if (kind === 'profiles') {
+      if (kind === "profiles") {
         return /^\d{17}$/.test(value) ? value : null;
       }
+      // kind === "id" -> Vanity
       const vanityEndpoint = `https://api.steampowered.com/ISteamUser/ResolveVanityURL/v0001/?key=${encodeURIComponent(
         apiKeyParam
       )}&vanityurl=${encodeURIComponent(value)}`;
@@ -551,7 +1062,7 @@ export const getServerSideProps: GetServerSideProps<HomeProps> = async (
         const vd = await fetchJsonWithRetry(vanityEndpoint, { timeoutMs: 12000, retries: 2 });
         const maybeId = vd?.response?.steamid;
         const success = vd?.response?.success;
-        if (success === 1 && typeof maybeId === 'string' && /^\d+$/.test(maybeId)) {
+        if (success === 1 && typeof maybeId === "string" && /^\d+$/.test(maybeId)) {
           return maybeId;
         }
         return null;
@@ -560,7 +1071,8 @@ export const getServerSideProps: GetServerSideProps<HomeProps> = async (
       }
     }
     if (/^\d{17}$/.test(input)) return input;
-    if (/^\d+$/.test(input)) return input;
+    if (/^\d+$/.test(input)) return input; // 允许非17位数字
+    // 仅Vanity用户名（无URL）
     const vanityEndpoint = `https://api.steampowered.com/ISteamUser/ResolveVanityURL/v0001/?key=${encodeURIComponent(
       apiKeyParam
     )}&vanityurl=${encodeURIComponent(input)}`;
@@ -568,7 +1080,7 @@ export const getServerSideProps: GetServerSideProps<HomeProps> = async (
       const vd = await fetchJsonWithRetry(vanityEndpoint, { timeoutMs: 12000, retries: 2 });
       const maybeId = vd?.response?.steamid;
       const success = vd?.response?.success;
-      if (success === 1 && typeof maybeId === 'string' && /^\d+$/.test(maybeId)) {
+      if (success === 1 && typeof maybeId === "string" && /^\d+$/.test(maybeId)) {
         return maybeId;
       }
       return null;
@@ -585,15 +1097,16 @@ export const getServerSideProps: GetServerSideProps<HomeProps> = async (
     if (id) {
       resolvedPairs.push({ id, key: p.key });
     } else {
-      resolveErrors.push(`Could not resolve: ${p.input}`);
+      resolveErrors.push(`无法解析: ${p.input}`);
     }
   }
 
   if (resolvedPairs.length === 0) {
-    props.error = resolveErrors.length > 0 ? resolveErrors.join('; ') : 'Could not resolve any Steam IDs.';
+    props.error = resolveErrors.length > 0 ? resolveErrors.join("; ") : "无法解析任何Steam ID";
     return { props };
   }
 
+  // 并发查询每个账号的游戏
   const fetchOwned = async (sid: string, key: string) => {
     const endpoint = `https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?key=${encodeURIComponent(
       key
@@ -619,7 +1132,7 @@ export const getServerSideProps: GetServerSideProps<HomeProps> = async (
 
   results.forEach((res, idx) => {
     const sid = resolvedPairs[idx]?.id;
-    if (res.status === 'fulfilled') {
+    if (res.status === "fulfilled") {
       const list = res.value as Array<{ appid: number; name: string; playtime_forever: number }>;
       for (const g of list) {
         const prev = aggregated.get(g.appid);
@@ -630,22 +1143,23 @@ export const getServerSideProps: GetServerSideProps<HomeProps> = async (
         }
       }
     } else {
-      const msg = String((res as any).reason?.message || 'Query failed');
-      fetchErrors.push(`Account ${sid} query failed: ${msg}`);
+      const msg = String((res as any).reason?.message || "查询失败");
+      fetchErrors.push(`账号 ${sid} 查询失败: ${msg}`);
     }
   });
 
   const aggregatedGames = Array.from(aggregated.values());
   if (aggregatedGames.length === 0) {
-    props.error = fetchErrors.length > 0 ? fetchErrors.join('; ') : 'No games found for any account. Please check privacy settings and network.';
+    props.error = fetchErrors.length > 0 ? fetchErrors.join("; ") : "未找到任何账号的游戏，请检查隐私设置与网络。";
     return { props };
   }
 
   props.initialGames = aggregatedGames;
   if (fetchErrors.length > 0 || resolveErrors.length > 0) {
-    props.error = [...resolveErrors, ...fetchErrors].join('; ');
+    props.error = [...resolveErrors, ...fetchErrors].join("; ");
   }
 
+  // 获取首个用户的头像与用户名
   try {
     const first = resolvedPairs[0];
     if (first) {
@@ -654,10 +1168,10 @@ export const getServerSideProps: GetServerSideProps<HomeProps> = async (
       )}&steamids=${encodeURIComponent(first.id)}`;
       const psData = await fetchJsonWithRetry(psUrl, { timeoutMs: 12000, retries: 1 });
       const player = psData?.response?.players?.[0];
-      if (player && typeof player === 'object') {
+      if (player && typeof player === "object") {
         props.initialProfile = {
-          avatar: String(player.avatarfull || player.avatar || ''),
-          personaname: String(player.personaname || ''),
+          avatar: String(player.avatarfull || player.avatar || ""),
+          personaname: String(player.personaname || ""),
         };
       }
     }
@@ -665,10 +1179,11 @@ export const getServerSideProps: GetServerSideProps<HomeProps> = async (
     // ignore profile errors
   }
 
+  // 检测全成就（优化为并发+限量，避免请求过多导致SSR超时）
   try {
     const LIMIT = Math.min(50, aggregatedGames.length);
     const CONCURRENCY = 6;
-    const MAX_REQUESTS = Math.min(LIMIT * resolvedPairs.length, 200);
+    const MAX_REQUESTS = Math.min(LIMIT * resolvedPairs.length, 200); // 动态上限，随账号数与前50规模调整
     const topGames = [...aggregatedGames]
       .sort((a, b) => (b.playtime_forever || 0) - (a.playtime_forever || 0))
       .slice(0, LIMIT);
@@ -691,12 +1206,14 @@ export const getServerSideProps: GetServerSideProps<HomeProps> = async (
     };
 
     let issued = 0;
+    // 将待检查任务展开为 [appid, rp] 组合，优先按时长靠前的游戏
     const tasks: Array<{ appid: number; rp: { id: string; key: string } }> = [];
     for (const g of topGames) {
       for (const rp of resolvedPairs) {
         tasks.push({ appid: g.appid, rp });
       }
     }
+    // 并发执行，提早收集到金边即可跳过该app的后续检查
     const seenApps = new Set<number>();
     let i = 0;
     while (i < tasks.length && issued < MAX_REQUESTS) {
@@ -706,7 +1223,7 @@ export const getServerSideProps: GetServerSideProps<HomeProps> = async (
         batch.map(({ appid, rp }) => checkFull(appid, rp.id, rp.key).then(ok => ({ appid, ok })))
       );
       for (const r of results) {
-        if (r.status === 'fulfilled') {
+        if (r.status === "fulfilled") {
           const { appid, ok } = r.value as { appid: number; ok: boolean };
           if (ok) {
             goldSet.add(appid);
