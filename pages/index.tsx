@@ -973,9 +973,9 @@ const HomePage: NextPage<HomeProps> = ({
                   type="button"
                   onClick={handleGenerate}
                   disabled={!hasGames || isDrawing}
-                  className="inline-flex items-center justify-center rounded-lg border-4 border-black bg-[#D8B4FE] text-black px-3 py-2 text-xs font-extrabold uppercase tracking-wide shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] transition-transform hover:-translate-y-1 hover:translate-x-1 active:translate-y-0 active:translate-x-0 disabled:cursor-not-allowed disabled:bg-gray-300"
+                  className="inline-flex items-center justify-center rounded-lg border-4 border-black bg-[#D8B4FE] text-black px-3 py-2 text-xs font-extrabold uppercase tracking-wide shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] transition-transform hover:-translate-y-1 hover:translate-x-1 active:translate..."
                 >
-                  {isDrawing ? "Generating..." : "Generate Collage"}
+                  {isDrawing ? "Generating..." : "下载PNG"}
                 </button>
               </div>
 
