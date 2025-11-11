@@ -784,23 +784,32 @@ const HomePage: NextPage<HomeProps> = ({
     );
   };
 
-  const handleDownload = async () => {
-    const canvas = canvasRef.current;
-    if (!canvas) {
-      return;
-    }
+  const handleGenerate = async () => {
+    setIsDrawing(true);
+    setImageStatus('Generating collage...');
 
     try {
-      const dataUrl = canvas.toDataURL("image/png");
-      setPreviewImage(dataUrl); // Set the preview image
-      const link = document.createElement("a");
-      link.href = dataUrl;
-      link.download = `steam-collage-${layoutGames.length}games-${canvasDimensions.width}x${canvasDimensions.height}.png`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    } catch {
-      setImageStatus("导出失败,可能是浏览器安全限制");
+      const response = await axios.post(
+        '/api/generate-collage',
+        { games: layoutGames },
+        { responseType: 'blob' }
+      );
+      const imageUrl = URL.createObjectURL(response.data);
+      setPreviewImage(imageUrl);
+    } catch (error) {
+      console.error(error);
+      setImageStatus('Error generating collage');
+    }
+
+    setIsDrawing(false);
+  };
+
+  const handleDownload = () => {
+    if (previewImage) {
+      const a = document.createElement('a');
+      a.href = previewImage;
+      a.download = 'steam-collage.png';
+      a.click();
     }
   };
 
@@ -960,11 +969,11 @@ const HomePage: NextPage<HomeProps> = ({
               <div className="flex items-center justify-between gap-2 mt-4 mb-4 md:mt-5 md:mb-5">
                 <button
                   type="button"
-                  onClick={handleDownload}
+                  onClick={handleGenerate}
                   disabled={!hasGames || isDrawing}
                   className="inline-flex items-center justify-center rounded-lg border-4 border-black bg-[#D8B4FE] text-black px-3 py-2 text-xs font-extrabold uppercase tracking-wide shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] transition-transform hover:-translate-y-1 hover:translate-x-1 active:translate-y-0 active:translate-x-0 disabled:cursor-not-allowed disabled:bg-gray-300"
                 >
-                  {isDrawing ? "生成中..." : "下载PNG"}
+                  {isDrawing ? "Generating..." : "Generate Collage"}
                 </button>
               </div>
 
