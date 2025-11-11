@@ -989,11 +989,11 @@ const HomePage: NextPage<HomeProps> = ({
               </div>
 
               <canvas ref={canvasRef} style={{ display: 'none' }} />
-              <div className={styles.preview}>
-                {previewImage && (
+              {previewImage && (
+                <div className={styles.preview}>
                   <img src={previewImage} alt="Preview" className={styles.previewImage} />
-                )}
-              </div>
+                </div>
+              )}
             </div>
           </section>
         </main>
