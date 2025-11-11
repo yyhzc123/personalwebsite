@@ -172,13 +172,8 @@ const HomePage: NextPage<HomeProps> = ({
       .map((game) => {
         const sqrtVal = Math.sqrt(Math.max(game.playtime_forever, 1));
         const normalized = sqrtVal / sqrtMax;
-        let mult = Math.max(1, Math.round(normalized * TIER_MAX));
-        const hours = (game.playtime_forever || 0) / 60;
-        if (hours >= 10) {
-          mult = Math.max(mult, 2);
-        } else {
-          mult = 1;
-        }
+        // Use a slightly more aggressive scaling and ensure mult is at least 1
+        let mult = Math.max(1, Math.ceil(normalized * TIER_MAX));
         return { game, mult };
       })
       .sort((a, b) => {
@@ -296,7 +291,12 @@ const HomePage: NextPage<HomeProps> = ({
     };
 
     // 第一阶段：从大到小为主，加入少量乱序（避免完全按大小排列）
-    const remainingDesc = [...prepared].sort((a, b) => b.mult - a.mult);
+    const remainingDesc = [...prepared].sort((a, b) => {
+      if (b.mult !== a.mult) {
+        return b.mult - a.mult;
+      }
+      return (b.game.playtime_forever || 0) - (a.game.playtime_forever || 0);
+    });
     const overflow: typeof prepared = [];
 
     for (const it of remainingDesc) {
@@ -319,104 +319,41 @@ const HomePage: NextPage<HomeProps> = ({
       splitFreeRect(target, placed);
     }
 
-    // 第二阶段：对每个自由矩形在内部进行“局部货架式”多次填充
-    // 目标：优先用大级数尽量填满该矩形的上方与每一排
-    freeRects.sort((a, b) => (a.y - b.y) || (a.x - b.x));
-    const remainingAsc = overflow.sort((a, b) => b.mult - a.mult);
-
-    const fillRectWithShelf = (fr: Rect) => {
-      // 从全局自由矩形中移除，改为在该矩形内部循环填充
-      const idx = freeRects.indexOf(fr);
-      if (idx >= 0) freeRects.splice(idx, 1);
-
-      let rect: Rect = { ...fr };
-      let placedAny = false;
-
-      // 在该rect内反复填充多行（从上到下）
-      while (rect.height >= baseUnitHeight) {
-        // 选择该行高度：挑选能放进rect的候选中“最小高度”，以小级数优先
-        const candidates = remainingAsc.filter(it => it.height <= rect.height && it.width <= rect.width);
-        if (candidates.length === 0) break;
-        const rowHeight = Math.min(...candidates.map(it => it.height));
-
-        let localX = rect.x;
-        let spaceW = rect.width;
-        let rowMaxH = 0;
-        let rowPlaced = 0;
-
-        // 在该行内，从左到右用“小宽度且能放下”的元素尽量占满
-        // 每次找到一个就重新扫描，直到该行无法再放置
-        for (;;) {
-          let foundIndex = -1;
-          let foundWidth = 0;
-
-          for (let i = 0; i < remainingAsc.length; i++) {
-            const it = remainingAsc[i];
-            if (it.width <= spaceW && it.height <= rowHeight) {
-              // 优先选择更宽的（更容易填满剩余空间）
-              if (it.width > foundWidth) {
-                foundWidth = it.width;
-                foundIndex = i;
-              }
-            }
-          }
-
-          if (foundIndex === -1) break; // 该行不能再放置
-
-          const it = remainingAsc[foundIndex];
-          const placed: Rect = { x: localX, y: rect.y, width: it.width, height: it.height };
-
-          results.push({
-            ...it.game,
-            x: placed.x,
-            y: placed.y,
-            width: placed.width,
-            height: placed.height,
-            albumUrl: buildAlbumUrl(it.game.appid),
-          });
-
-          localX += it.width;
-          spaceW -= it.width;
-          rowMaxH = Math.max(rowMaxH, it.height);
-          rowPlaced += 1;
-          remainingAsc.splice(foundIndex, 1);
-
-          // 防止死循环
-          if (spaceW < baseUnitWidth) break;
-        }
-
-        if (rowPlaced === 0) break; // 该行无法放置任何元素
-
-        // 该行右侧剩余空间作为新的自由矩形暴露给全局（供后续行或其他空隙继续填）
-        if (spaceW > 0) {
-          addFreeRect({ x: localX, y: rect.y, width: spaceW, height: rowMaxH });
-        }
-
-        // 消化当前行高度，进入下一行
-        rect.y += rowMaxH;
-        rect.height -= rowMaxH;
-        placedAny = true;
-
-        // 清理冗余
-        pruneFreeRects();
+    // 第二阶段：使用与第一阶段相同的逻辑，继续填充剩余的图片
+    // 这样可以确保始终优先放置最大的可用图片
+    overflow.sort((a, b) => {
+      if (b.mult !== a.mult) {
+        return b.mult - a.mult;
       }
+      return (b.game.playtime_forever || 0) - (a.game.playtime_forever || 0);
+    });
 
-      // 把未被填满的底部剩余区域也作为自由矩形继续暴露（供其他循环尝试）
-      if (rect.height > 0 && rect.width > 0) {
-        addFreeRect(rect);
-        pruneFreeRects();
+    for (const it of overflow) {
+      const w = it.width;
+      const h = it.height;
+      const target = chooseBestRect(w, h);
+      if (!target) {
+        // 如果此时仍然无法放置，则该图片被丢弃
+        continue;
       }
-      return placedAny;
-    };
-
-    for (const fr of freeRects.slice()) {
-      fillRectWithShelf(fr);
+      const placed: Rect = { x: target.x, y: target.y, width: w, height: h };
+      results.push({
+        ...it.game,
+        x: placed.x,
+        y: placed.y,
+        width: placed.width,
+        height: placed.height,
+        albumUrl: buildAlbumUrl(it.game.appid),
+      });
+      splitFreeRect(target, placed);
     }
 
-    return results;
+    // 最终清理所有剩余的自由矩形（可选）
+    // freeRects.length = 0;
+
+    return results.sort((a, b) => a.y - b.y || a.x - a.x);
   }, [initialGames, canvasDimensions]);
 
-  // Draw the collage into a canvas
   useEffect(() => {
     let isCancelled = false;
 
@@ -748,7 +685,7 @@ const HomePage: NextPage<HomeProps> = ({
     return () => {
       isCancelled = true;
     };
-  }, [layoutGames, canvasDimensions]);
+  }, [layoutGames, canvasDimensions])
 
   const hasGames = layoutGames.length > 0;
 
