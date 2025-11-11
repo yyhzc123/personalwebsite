@@ -611,18 +611,7 @@ const HomePage: NextPage<HomeProps> = ({
     document.body.removeChild(a);
   };
 
-  const handleImageError = () => {
-    if (!canvasRef.current) return;
-    setIsGenerating(true);
-    const canvas = canvasRef.current;
-    const dataUrl = canvas.toDataURL('image/png');
-    const a = document.createElement('a');
-    a.href = dataUrl;
-    a.download = 'steam-collage.png';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  };
+
 
   const scaleX = 100 / canvasDimensions.width;
   const scaleY = 100 / canvasDimensions.height;
