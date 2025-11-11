@@ -8,6 +8,7 @@ import React, {
 import type { NextPage, GetServerSideProps } from "next";
 import Head from "next/head";
 import { useRouter } from "next/router";
+import styles from '../styles/index.module.css';
 
 // Use 2:3 library capsule image ratio
 const HEADER_RATIO = 2 / 3;
