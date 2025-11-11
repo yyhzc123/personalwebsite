@@ -10,6 +10,7 @@ import type { NextPage, GetServerSideProps } from "next";
 import Head from "next/head";
 import { useRouter } from "next/router";
 import styles from '../styles/index.module.css';
+import axios from "axios";
 
 // Use 2:3 library capsule image ratio
 const HEADER_RATIO = 2 / 3;
@@ -28,6 +29,13 @@ type LayoutGame = SteamGame & {
   width: number;
   height: number;
   albumUrl: string;
+};
+
+type Rect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 };
 
 interface HomeProps {
@@ -145,276 +153,82 @@ const HomePage: NextPage<HomeProps> = ({
   }, [initialGames]);
 
   // 计算布局：按离散分级（边长为整数倍）并用“自由矩形填充”优先填补上半部空隙
-  const layoutGames: LayoutGame[] = useMemo(() => {
-    if (!initialGames || initialGames.length === 0) {
+  const layoutGames = useMemo<LayoutGame[]>(() => {
+    if (initialGames.length === 0) {
       return [];
     }
 
-    const sorted = [...initialGames].sort(
-      (a, b) => (b.playtime_forever || 0) - (a.playtime_forever || 0)
-    );
+    const LAYOUT_WIDTH = canvasDimensions.width;
+    const LAYOUT_HEIGHT = canvasDimensions.height;
 
-    // 显示所有账号的所有游戏（包含0时长）
-    const baseList = sorted;
+    const items = initialGames.map(game => {
+      const aspectRatio = 2 / 3;
+      const area = (game.playtime_forever / 100) * 20;
+      const height = Math.sqrt(area / aspectRatio);
+      const width = height * aspectRatio;
+      return { ...game, width, height, albumUrl: buildAlbumUrl(game.appid) };
+    });
 
-    if (baseList.length === 0) {
-      return [];
-    }
-    // 离散分级（边长为整数倍）与面积近似正比时长
-    const times = baseList.map(g => Math.max(g.playtime_forever, 1));
-    const maxTime = Math.max(...times, 1);
-    // 恢复之前的归一化方式：基于最大时长的平方根归一化
-    const sqrtMax = Math.sqrt(maxTime);
-    const TIER_MAX = 8; // 调整为8级，更柔和
+    items.sort((a, b) => b.height - a.height);
 
-    const items = baseList
-      .map((game) => {
-        const sqrtVal = Math.sqrt(Math.max(game.playtime_forever, 1));
-        const normalized = sqrtVal / sqrtMax;
-        let mult = Math.max(1, Math.round(normalized * TIER_MAX));
-        const hours = (game.playtime_forever || 0) / 60;
-        if (hours >= 10) {
-          mult = Math.max(mult, 2);
-        } else {
-          mult = 1;
-        }
-        return { game, mult };
-      })
-      .sort((a, b) => {
-        const t = (b.game.playtime_forever || 0) - (a.game.playtime_forever || 0);
-        if (t !== 0) return t;
-        return b.mult - a.mult;
-      });
-
+    const freeRects: Rect[] = [{ x: 0, y: 0, width: LAYOUT_WIDTH, height: LAYOUT_HEIGHT }];
     const results: LayoutGame[] = [];
-    const { width: LAYOUT_WIDTH, height: LAYOUT_HEIGHT } = canvasDimensions;
-    const ASPECT_RATIO = 2 / 3;
 
-    const totalUnits = items.reduce((acc, it) => acc + it.mult * it.mult, 0);
-    const canvasArea = LAYOUT_WIDTH * LAYOUT_HEIGHT;
-    let baseUnitArea = canvasArea / Math.max(totalUnits, 1);
-    let baseUnitHeight = Math.sqrt(baseUnitArea / ASPECT_RATIO);
-    let baseUnitWidth = baseUnitHeight * ASPECT_RATIO;
+    for (const game of items) {
+      let bestScore = Infinity;
+      let bestRectIndex = -1;
+      let bestNode: Rect | null = null;
 
-    const maxMult = items.length ? Math.max(...items.map(i => i.mult)) : 1;
-    const maxItemWidth = maxMult * baseUnitWidth;
-    if (maxItemWidth > LAYOUT_WIDTH) {
-      const scale = LAYOUT_WIDTH / maxItemWidth;
-      baseUnitWidth *= scale;
-      baseUnitHeight *= scale;
-    }
-
-    // 量化基础单元，使得布局宽度可被整除，减少无法填满的缝隙
-    const gridCols = Math.max(1, Math.floor(LAYOUT_WIDTH / Math.max(baseUnitWidth, 1)));
-    baseUnitWidth = Math.max(1, Math.floor(LAYOUT_WIDTH / gridCols));
-    baseUnitHeight = Math.max(1, Math.round(baseUnitWidth / ASPECT_RATIO));
-
-    type Rect = { x: number; y: number; width: number; height: number };
-    // 画布顶部预留信息栏高度（不大，占整体高度约6%，上限100px，下限60px）
-    const headerInfoHeight = Math.max(60, Math.round(Math.min(LAYOUT_HEIGHT * 0.06, 100)));
-
-    const freeRects: Rect[] = [
-      { x: 0, y: headerInfoHeight, width: LAYOUT_WIDTH, height: Math.max(0, LAYOUT_HEIGHT - headerInfoHeight) },
-    ];
-
-    const RANDOM_SEED = 1337.123;
-    const prepared = items.map(it => ({
-      ...it,
-      width: it.mult * baseUnitWidth,
-      height: it.mult * baseUnitHeight,
-      // 使用基于 appid 的可复现抖动，避免 SSR/CSR 乱序导致水合不一致
-      rnd: Math.abs(Math.sin((it.game.appid || 0) * RANDOM_SEED)),
-    }));
-
-    // 工具：矩形包含判断
-    const contains = (a: Rect, b: Rect) =>
-      a.x <= b.x && a.y <= b.y && (a.x + a.width) >= (b.x + b.width) && (a.y + a.height) >= (b.y + b.height);
-
-    // 工具：清理被包含的自由矩形，避免重叠/冗余
-    const pruneFreeRects = () => {
       for (let i = 0; i < freeRects.length; i++) {
-        for (let j = 0; j < freeRects.length; j++) {
-          if (i === j) continue;
-          const ri = freeRects[i];
-          const rj = freeRects[j];
-          if (ri && rj && contains(rj, ri)) {
-            freeRects.splice(i, 1);
-            i--;
-            break;
-          }
-        }
-      }
-    };
-
-    const addFreeRect = (r: Rect) => {
-      if (r.width <= 0 || r.height <= 0) return;
-      freeRects.push(r);
-    };
-
-    // 选择最佳自由矩形：优先上方（y小）、其次左方（x小），并奖励“宽或高精确匹配”
-    const chooseBestRect = (w: number, h: number): Rect | null => {
-      let best: Rect | null = null;
-      let bestScore = Number.POSITIVE_INFINITY;
-      for (const fr of freeRects) {
-        if (fr.width >= w && fr.height >= h) {
-          const exactW = fr.width === w;
-          const exactH = fr.height === h;
-          // 分数：上方优先，其次左方；精确匹配给予大幅奖励（降低分数）
-          const score = fr.y * LAYOUT_WIDTH + fr.x + (exactW && exactH ? -1e6 : (exactW || exactH ? -5e5 : 0));
+        const freeRect = freeRects[i];
+        if (game.width <= freeRect.width && game.height <= freeRect.height) {
+          const score = freeRect.width * freeRect.height - game.width * game.height;
           if (score < bestScore) {
             bestScore = score;
-            best = fr;
+            bestRectIndex = i;
+            bestNode = {
+              x: freeRect.x,
+              y: freeRect.y,
+              width: game.width,
+              height: game.height,
+            };
           }
         }
       }
-      return best;
-    };
 
-    // 使用“断头台”式拆分：产生右侧与底部两个自由矩形，并清理冗余
-    const splitFreeRect = (fr: Rect, placed: Rect) => {
-      // 移除被使用的自由矩形
-      const idx = freeRects.indexOf(fr);
-      if (idx >= 0) freeRects.splice(idx, 1);
+      if (bestNode) {
+        results.push({
+          ...game,
+          x: bestNode.x,
+          y: bestNode.y,
+        });
 
-      const right: Rect = {
-        x: placed.x + placed.width,
-        y: fr.y,
-        width: fr.width - placed.width,
-        height: placed.height,
-      };
-      const bottom: Rect = {
-        x: fr.x,
-        y: placed.y + placed.height,
-        width: fr.width,
-        height: fr.height - placed.height,
-      };
+        const toSplit = freeRects.splice(bestRectIndex, 1)[0];
+        const newFreeRects: Rect[] = [];
 
-      addFreeRect(right);
-      addFreeRect(bottom);
-      pruneFreeRects();
-    };
+        const canSplitHorizontally = bestNode.width < toSplit.width;
+        const canSplitVertically = bestNode.height < toSplit.height;
 
-    // 第一阶段：从大到小为主，加入少量乱序（避免完全按大小排列）
-    const RANDOM_JITTER = 0.2; // 乱序强度，可调小以保持大体有序
-    const remainingDesc = [...prepared].sort((a, b) => {
-      const sa = -a.mult + (a.rnd - 0.5) * RANDOM_JITTER;
-      const sb = -b.mult + (b.rnd - 0.5) * RANDOM_JITTER;
-      return sa - sb;
-    });
-    const overflow: typeof prepared = [];
-
-    for (const it of remainingDesc) {
-      const w = it.width;
-      const h = it.height;
-      const target = chooseBestRect(w, h);
-      if (!target) {
-        overflow.push(it);
-        continue;
-      }
-      const placed: Rect = { x: target.x, y: target.y, width: w, height: h };
-      results.push({
-        ...it.game,
-        x: placed.x,
-        y: placed.y,
-        width: placed.width,
-        height: placed.height,
-        albumUrl: buildAlbumUrl(it.game.appid),
-      });
-      splitFreeRect(target, placed);
-    }
-
-    // 第二阶段：对每个自由矩形在内部进行“局部货架式”多次填充
-    // 目标：优先用小级数尽量填满该矩形的上方与每一排，减少中间整排空白
-    freeRects.sort((a, b) => (a.y - b.y) || (a.x - b.x));
-    const remainingAsc = overflow.sort((a, b) => a.mult - b.mult);
-
-    const fillRectWithShelf = (fr: Rect) => {
-      // 从全局自由矩形中移除，改为在该矩形内部循环填充
-      const idx = freeRects.indexOf(fr);
-      if (idx >= 0) freeRects.splice(idx, 1);
-
-      let rect: Rect = { ...fr };
-      let placedAny = false;
-
-      // 在该rect内反复填充多行（从上到下）
-      while (rect.height >= baseUnitHeight) {
-        // 选择该行高度：挑选能放进rect的候选中“最小高度”，以小级数优先
-        const candidates = remainingAsc.filter(it => it.height <= rect.height && it.width <= rect.width);
-        if (candidates.length === 0) break;
-        const rowHeight = Math.min(...candidates.map(it => it.height));
-
-        let localX = rect.x;
-        let spaceW = rect.width;
-        let rowMaxH = 0;
-        let rowPlaced = 0;
-
-        // 在该行内，从左到右用“小宽度且能放下”的元素尽量占满
-        // 每次找到一个就重新扫描，直到该行无法再放置
-        for (;;) {
-          let foundIndex = -1;
-          let foundWidth = Number.POSITIVE_INFINITY;
-
-          for (let i = 0; i < remainingAsc.length; i++) {
-            const it = remainingAsc[i];
-            if (it.width <= spaceW && it.height <= rowHeight) {
-              // 优先选择更窄的（更容易填满剩余空间）
-              if (it.width < foundWidth) {
-                foundWidth = it.width;
-                foundIndex = i;
-              }
-            }
-          }
-
-          if (foundIndex === -1) break; // 该行不能再放置
-
-          const it = remainingAsc[foundIndex];
-          const placed: Rect = { x: localX, y: rect.y, width: it.width, height: it.height };
-
-          results.push({
-            ...it.game,
-            x: placed.x,
-            y: placed.y,
-            width: placed.width,
-            height: placed.height,
-            albumUrl: buildAlbumUrl(it.game.appid),
+        if (canSplitHorizontally) {
+          newFreeRects.push({
+            x: toSplit.x + bestNode.width,
+            y: toSplit.y,
+            width: toSplit.width - bestNode.width,
+            height: toSplit.height,
           });
-
-          localX += it.width;
-          spaceW -= it.width;
-          rowMaxH = Math.max(rowMaxH, it.height);
-          rowPlaced += 1;
-          remainingAsc.splice(foundIndex, 1);
-
-          // 防止死循环
-          if (spaceW < baseUnitWidth) break;
         }
 
-        if (rowPlaced === 0) break; // 该行无法放置任何元素
-
-        // 该行右侧剩余空间作为新的自由矩形暴露给全局（供后续行或其他空隙继续填）
-        if (spaceW > 0) {
-          addFreeRect({ x: localX, y: rect.y, width: spaceW, height: rowMaxH });
+        if (canSplitVertically) {
+          newFreeRects.push({
+            x: toSplit.x,
+            y: toSplit.y + bestNode.height,
+            width: canSplitHorizontally ? bestNode.width : toSplit.width,
+            height: toSplit.height - bestNode.height,
+          });
         }
 
-        // 消化当前行高度，进入下一行
-        rect.y += rowMaxH;
-        rect.height -= rowMaxH;
-        placedAny = true;
-
-        // 清理冗余
-        pruneFreeRects();
+        freeRects.push(...newFreeRects);
       }
-
-      // 把未被填满的底部剩余区域也作为自由矩形继续暴露（供其他循环尝试）
-      if (rect.height > 0 && rect.width > 0) {
-        addFreeRect(rect);
-        pruneFreeRects();
-      }
-      return placedAny;
-    };
-
-    for (const fr of freeRects.slice()) {
-      fillRectWithShelf(fr);
     }
 
     return results;
@@ -786,12 +600,28 @@ const HomePage: NextPage<HomeProps> = ({
   };
 
   const handleDownload = () => {
-    if (previewImage) {
-      const a = document.createElement('a');
-      a.href = previewImage;
-      a.download = 'steam-collage.png';
-      a.click();
-    }
+    if (!canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const dataUrl = canvas.toDataURL('image/png');
+    const a = document.createElement('a');
+    a.href = dataUrl;
+    a.download = 'steam-collage.png';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  const handleImageError = () => {
+    if (!canvasRef.current) return;
+    setIsGenerating(true);
+    const canvas = canvasRef.current;
+    const dataUrl = canvas.toDataURL('image/png');
+    const a = document.createElement('a');
+    a.href = dataUrl;
+    a.download = 'steam-collage.png';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   };
 
   const scaleX = 100 / canvasDimensions.width;
