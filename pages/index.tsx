@@ -944,36 +944,16 @@ const HomePage: NextPage<HomeProps> = ({
                     </div>
                   )}
 
-                  {hasGames && (
-                    <div className="absolute inset-0">
-                      {layoutGames.map((game) => (
-                        <div
-                          key={game.appid}
-                          className="absolute border border-black overflow-hidden group"
-                          style={{
-                            left: `${game.x * scaleX}%`,
-                            top: `${game.y * scaleY}%`,
-                            width: `${game.width * scaleX}%`,
-                            height: `${game.height * scaleY}%`,
-                          }}
-                        >
-                          <img
-                            src={game.albumUrl}
-                            alt={game.name}
-                            className="h-full w-full object-cover"
-                          />
-                          <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-[#1DB954] bg-opacity-80 px-1 py-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <p className="truncate font-semibold text-black" style={{ fontSize: 'clamp(0.5rem, 2.5vw, 1rem)' }}>
-                              {game.name}
-                            </p>
-                            <p className="text-gray-700" style={{ fontSize: 'clamp(0.5rem, 2.5vw, 0.9rem)' }}>
-                              {Math.round(game.playtime_forever / 60)}小时
-                            </p>
-                          </div>
-                        </div>
-                      ))}
+                  {previewImage ? (
+                    <img src={previewImage} alt="Generated Collage" className="h-full w-full object-contain bg-gray-800" />
+                  ) : hasGames ? (
+                    <div className="flex h-full flex-col items-center justify-center gap-4 bg-green-100">
+                      <div className="bg-gray-200 border-2 border-dashed rounded-xl w-16 h-16 animate-pulse" />
+                      <p className="max-w-xs px-4 text-center text-xs md:text-sm font-semibold">
+                        {imageStatus}
+                      </p>
                     </div>
-                  )}
+                  ) : null}
                 </div>
               </div>
 
@@ -989,11 +969,6 @@ const HomePage: NextPage<HomeProps> = ({
               </div>
 
               <canvas ref={canvasRef} style={{ display: 'none' }} />
-              {previewImage && (
-                <div className={styles.preview}>
-                  <img src={previewImage} alt="Preview" className={styles.previewImage} />
-                </div>
-              )}
             </div>
           </section>
         </main>
