@@ -123,6 +123,7 @@ const HomePage: NextPage<HomeProps> = ({
   const [imageStatus, setImageStatus] = useState<string | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
 
   const canSubmit = useMemo(
     () => Boolean(globalApiKey.trim()) && accounts.length > 0 && accounts.every(a => a.steamId.trim()),
@@ -740,6 +741,7 @@ const HomePage: NextPage<HomeProps> = ({
           `完成!共 ${layoutGames.length} 个游戏,分辨率 ${canvasDimensions.width}x${canvasDimensions.height}`
         );
         setIsDrawing(false);
+        setPreviewImage(canvas.toDataURL("image/png"));
       }
     };
 
@@ -754,6 +756,8 @@ const HomePage: NextPage<HomeProps> = ({
 
   const handleSubmit = (event: FormEvent) => {
     event.preventDefault();
+
+    setPreviewImage(null); // Reset preview on new submission
 
     const normalizedSteamIds = accounts
       .map(a => a.steamId.trim())
@@ -779,7 +783,7 @@ const HomePage: NextPage<HomeProps> = ({
     );
   };
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     const canvas = canvasRef.current;
     if (!canvas) {
       return;
@@ -787,6 +791,7 @@ const HomePage: NextPage<HomeProps> = ({
 
     try {
       const dataUrl = canvas.toDataURL("image/png");
+      setPreviewImage(dataUrl); // Set the preview image
       const link = document.createElement("a");
       link.href = dataUrl;
       link.download = `steam-collage-${layoutGames.length}games-${canvasDimensions.width}x${canvasDimensions.height}.png`;
@@ -982,7 +987,12 @@ const HomePage: NextPage<HomeProps> = ({
                 </button>
               </div>
 
-              <canvas ref={canvasRef} className="hidden" />
+              <canvas ref={canvasRef} style={{ display: 'none' }} />
+              <div className={styles.preview}>
+                {previewImage && (
+                  <img src={previewImage} alt="Preview" className={styles.previewImage} />
+                )}
+              </div>
             </div>
           </section>
         </main>
